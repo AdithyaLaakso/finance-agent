@@ -12,7 +12,6 @@ import io
 import base64
 from datetime import datetime
 
-# Pydantic models for structured output
 class Color(BaseModel):
     r: int
     g: int
@@ -44,12 +43,10 @@ class Output(BaseModel):
     display_chart: bool
 
 def get_uploaded_csv_data(uploaded_files):
-    """Process uploaded CSV files"""
     data_paths = []
 
     for uploaded_file in uploaded_files:
         try:
-            # Read the uploaded file
             content = uploaded_file.read().decode('utf-8')
             data_paths.append({
                 "filename": uploaded_file.name,
@@ -61,24 +58,17 @@ def get_uploaded_csv_data(uploaded_files):
     return data_paths
 
 def create_chart_from_ai_output(chart_data: dict):
-    """Create a matplotlib chart from AI-generated chart data and return as image"""
     try:
-        # Parse the chart data using Pydantic model
         chart = Chart(**chart_data)
 
-        # Create the figure and axis
         fig, ax = plt.subplots(figsize=(12, 8))
 
-        # Plot each line
         for line in chart.lines:
-            # Extract x and y coordinates
             x_coords = [point.x for point in line.points]
             y_coords = [point.y for point in line.points]
 
-            # Convert RGB color to matplotlib format (0-1 range)
             color = (line.line_color.r/255, line.line_color.g/255, line.line_color.b/255)
 
-            # Plot the line
             ax.plot(x_coords, y_coords,
                    label=line.line_title,
                    color=color,
@@ -86,22 +76,17 @@ def create_chart_from_ai_output(chart_data: dict):
                    linewidth=2,
                    markersize=6)
 
-        # Set chart properties
         ax.set_title(chart.chart_title, fontsize=16, fontweight='bold', pad=20)
         ax.set_xlabel(chart.x_axis_label, fontsize=12)
         ax.set_ylabel(chart.y_axis_label, fontsize=12)
 
-        # Set axis limits
         ax.set_xlim(chart.x_min, chart.x_max)
         ax.set_ylim(chart.y_min, chart.y_max)
 
-        # Add grid for better readability
         ax.grid(True, alpha=0.3)
 
-        # Add legend
         ax.legend(fontsize=10)
 
-        # Improve layout
         plt.tight_layout()
 
         return fig
@@ -111,8 +96,6 @@ def create_chart_from_ai_output(chart_data: dict):
         return None
 
 def initialize_gemini():
-    """Initialize Gemini AI with API key"""
-    # Load environment variables from .env file
     load_dotenv()
 
     api_key = os.getenv("KEY") or st.secrets.get("KEY")
@@ -125,21 +108,16 @@ def initialize_gemini():
     return model
 
 def generate_chart_from_query(model, data_paths, user_query):
-    """Generate chart data based on user query and CSV data"""
-
-    # Format content for AI
     formatted_content = f"Here are {len(data_paths)} CSV files:\n\n"
     for i, item in enumerate(data_paths, 1):
         formatted_content += f"File {i}: {item['filename']}\n"
         formatted_content += f"```csv\n{item['content']}\n```\n\n"
 
-    # Create generation config with response schema
     generation_config = genai.GenerationConfig(
         response_mime_type="application/json",
         response_schema=Output
     )
 
-    # Enhanced prompt
     prompt = f"""
     {formatted_content}
 
@@ -171,7 +149,6 @@ def generate_chart_from_query(model, data_paths, user_query):
             generation_config=generation_config
         )
 
-        # Parse the JSON response
         chart_output = json.loads(response.text)
         return chart_output
 
@@ -189,7 +166,6 @@ def main():
     st.title("📊 AI-Powered Chart Generator")
     st.markdown("Upload your CSV files and chat with AI to generate insightful charts!")
 
-    # Initialize session state for chat history
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'csv_data' not in st.session_state:
@@ -208,11 +184,9 @@ def main():
             st.session_state.csv_data = get_uploaded_csv_data(uploaded_files)
             st.success(f"✅ Loaded {len(st.session_state.csv_data)} CSV file(s)")
 
-            # Show file previews
             with st.expander("📋 File Previews"):
                 for data in st.session_state.csv_data:
                     st.write(f"**{data['filename']}**")
-                    # Show first few lines
                     try:
                         df = pd.read_csv(io.StringIO(data['content']))
                         st.dataframe(df.head(3), use_container_width=True)
@@ -220,31 +194,25 @@ def main():
                         st.text(data['content'][:200] + "..." if len(data['content']) > 200 else data['content'])
                     st.divider()
 
-    # Main chat interface
     col1, col2 = st.columns([2, 1])
 
     with col1:
         st.header("💬 Chat Interface")
 
-        # Display chat history
         chat_container = st.container()
         with chat_container:
             for i, chat in enumerate(st.session_state.chat_history):
-                # User message
                 with st.chat_message("user"):
                     st.write(chat['user_message'])
 
-                # AI response
                 with st.chat_message("assistant"):
                     st.write(chat['ai_response'])
                     if chat.get('chart_fig'):
                         st.pyplot(chat['chart_fig'], use_container_width=True)
 
-        # Chat input
         user_input = st.chat_input("Ask me to create a chart from your data...")
 
         if user_input and st.session_state.csv_data:
-            # Initialize Gemini
             model = initialize_gemini()
 
             if not model:
@@ -252,18 +220,15 @@ def main():
                 return
 
             with st.spinner("🤖 AI is analyzing your data and generating chart..."):
-                # Generate chart based on user query
                 chart_output = generate_chart_from_query(model, st.session_state.csv_data, user_input)
 
                 if chart_output:
                     ai_response = chart_output['response']
 
-                    # Create chart if requested
                     chart_fig = None
                     if chart_output['display_chart']:
                         chart_fig = create_chart_from_ai_output(chart_output['chart'])
 
-                    # Add to chat history
                     st.session_state.chat_history.append({
                         'user_message': user_input,
                         'ai_response': ai_response,
@@ -272,7 +237,6 @@ def main():
                         'timestamp': datetime.now()
                     })
 
-                    # Refresh the page to show new chat
                     st.rerun()
 
         elif user_input and not st.session_state.csv_data:
