@@ -1,13 +1,18 @@
 import os
 import json
+import streamlit as st
 from typing import Union
 from dotenv import load_dotenv
 import google.generativeai as genai
 from pydantic import BaseModel
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import io
+import base64
+from datetime import datetime
 
-# Move classes outside the function for better accessibility
+# Pydantic models for structured output
 class Color(BaseModel):
     r: int
     g: int
@@ -38,22 +43,31 @@ class Output(BaseModel):
     chart: Chart
     display_chart: bool
 
-def get_csv_files(directory_path="./sample_data"):
-    """Get all CSV files from the specified directory"""
-    csv_files = []
-    for filename in os.listdir(directory_path):
-        if filename.endswith(".csv") and os.path.isfile(os.path.join(directory_path, filename)):
-            csv_files.append(os.path.join(directory_path, filename))
-    return csv_files
+def get_uploaded_csv_data(uploaded_files):
+    """Process uploaded CSV files"""
+    data_paths = []
 
-def create_chart_from_ai_output(chart_data: dict, save_path: str = None):
-    """Create a matplotlib chart from AI-generated chart data"""
+    for uploaded_file in uploaded_files:
+        try:
+            # Read the uploaded file
+            content = uploaded_file.read().decode('utf-8')
+            data_paths.append({
+                "filename": uploaded_file.name,
+                "content": content
+            })
+        except Exception as e:
+            st.error(f"Error reading file {uploaded_file.name}: {e}")
+
+    return data_paths
+
+def create_chart_from_ai_output(chart_data: dict):
+    """Create a matplotlib chart from AI-generated chart data and return as image"""
     try:
         # Parse the chart data using Pydantic model
         chart = Chart(**chart_data)
 
         # Create the figure and axis
-        plt.figure(figsize=(12, 8))
+        fig, ax = plt.subplots(figsize=(12, 8))
 
         # Plot each line
         for line in chart.lines:
@@ -65,67 +79,53 @@ def create_chart_from_ai_output(chart_data: dict, save_path: str = None):
             color = (line.line_color.r/255, line.line_color.g/255, line.line_color.b/255)
 
             # Plot the line
-            plt.plot(x_coords, y_coords,
-                    label=line.line_title,
-                    color=color,
-                    marker='o',
-                    linewidth=2,
-                    markersize=6)
+            ax.plot(x_coords, y_coords,
+                   label=line.line_title,
+                   color=color,
+                   marker='o',
+                   linewidth=2,
+                   markersize=6)
 
         # Set chart properties
-        plt.title(chart.chart_title, fontsize=16, fontweight='bold', pad=20)
-        plt.xlabel(chart.x_axis_label, fontsize=12)
-        plt.ylabel(chart.y_axis_label, fontsize=12)
+        ax.set_title(chart.chart_title, fontsize=16, fontweight='bold', pad=20)
+        ax.set_xlabel(chart.x_axis_label, fontsize=12)
+        ax.set_ylabel(chart.y_axis_label, fontsize=12)
 
         # Set axis limits
-        plt.xlim(chart.x_min, chart.x_max)
-        plt.ylim(chart.y_min, chart.y_max)
+        ax.set_xlim(chart.x_min, chart.x_max)
+        ax.set_ylim(chart.y_min, chart.y_max)
 
         # Add grid for better readability
-        plt.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.3)
 
         # Add legend
-        plt.legend(fontsize=10)
+        ax.legend(fontsize=10)
 
         # Improve layout
         plt.tight_layout()
 
-        # Save if path provided
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Chart saved to: {save_path}")
-
-        # Show the plot
-        plt.show()
-
-        return True
+        return fig
 
     except Exception as e:
-        print(f"Error creating chart: {e}")
-        return False
+        st.error(f"Error creating chart: {e}")
+        return None
 
-def main():
-    # Get CSV files
-    file_paths = get_csv_files()
-    data_paths = []
+def initialize_gemini():
+    """Initialize Gemini AI with API key"""
+    # Load environment variables from .env file
+    load_dotenv()
 
-    for file_path in file_paths:
-        try:
-            with open(file_path, 'r') as file:
-                content = file.read()
-                data_paths.append({
-                    "filename": os.path.basename(file_path),
-                    "content": content
-                })
-        except FileNotFoundError:
-            print(f"Warning: File {file_path} not found")
-        except Exception as e:
-            print(f"Warning: Error reading file {file_path}: {e}")
+    api_key = os.getenv("KEY") or st.secrets.get("KEY")
 
-    # Check if we found any files
-    if not data_paths:
-        print("No CSV files found or processed successfully")
-        return
+    if not api_key:
+        return None
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    return model
+
+def generate_chart_from_query(model, data_paths, user_query):
+    """Generate chart data based on user query and CSV data"""
 
     # Format content for AI
     formatted_content = f"Here are {len(data_paths)} CSV files:\n\n"
@@ -133,83 +133,150 @@ def main():
         formatted_content += f"File {i}: {item['filename']}\n"
         formatted_content += f"```csv\n{item['content']}\n```\n\n"
 
-    # Load environment and configure AI
-    load_dotenv()
-    api_key = os.getenv("KEY")
-    if not api_key:
-        raise ValueError("KEY not found in environment variables")
-
-    # Configure with API key
-    genai.configure(api_key=api_key)
-
-    # Use a more recent model that supports structured output
-    model = genai.GenerativeModel('gemini-2.5-flash')
-
     # Create generation config with response schema
     generation_config = genai.GenerationConfig(
         response_mime_type="application/json",
         response_schema=Output
     )
 
-    # Enhanced prompt for better structured response
+    # Enhanced prompt
     prompt = f"""
     {formatted_content}
 
-    Create a chart showing budget data over time. Return the response as a JSON object that matches the Chart schema exactly.
+    User Query: "{user_query}"
+
+    Based on the user's query and the CSV data provided, create an appropriate chart. Return the response as a JSON object that matches the Chart schema exactly.
 
     Requirements:
+    - Analyze the user's query to determine what type of visualization they want
     - Use the Chart schema structure
-    - Include proper x/y axis labels
+    - Include proper x/y axis labels relevant to the query
     - Set appropriate min/max values for axes based on the data range (add some padding)
-    - Create data points from the CSV data
+    - Create data points from the CSV data that best answer the user's question
     - Use meaningful colors for lines (RGB values 0-255)
-    - Title should describe what the chart shows
+    - Title should describe what the chart shows in relation to the user's query
     - For time-based data, use appropriate time intervals for x-axis
     - Ensure all numeric values are integers as required by the schema
-    - Show your work in the "work" field
+    - Show your analytical work in the "work" field
     - Double check the accuracy of all calculations
-    - Include a summary of the work in the "response" field
+    - Include a clear summary explaining the chart in the "response" field
+    - Set display_chart to true if a meaningful chart can be created, false otherwise
 
-    Show Gross Margin % trend for the last 3 months.
+    If the query cannot be answered with a meaningful chart from the available data, explain why in the response field and set display_chart to false.
     """
 
     try:
-        print("Generating chart data with AI...")
         response = model.generate_content(
             contents=[prompt],
             generation_config=generation_config
         )
 
-        print("Raw AI response:")
-        print(response.text)
-        print("-" * 50)
-
         # Parse the JSON response
-        try:
-            print(response.text)
-            chart_data = json.loads(response.text)['chart']
-            print("Successfully parsed AI response as JSON!")
-            print(f"Chart title: {chart_data.get('chart_title', 'Not found')}")
-            print(f"Number of lines: {len(chart_data.get('lines', []))}")
-
-            # Create the actual chart
-            print("\nCreating visual chart...")
-            success = create_chart_from_ai_output(
-                chart_data,
-                save_path="ai_generated_chart.png"
-            )
-
-            if success:
-                print("Chart created successfully!")
-            else:
-                print("Failed to create chart")
-
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse AI response as JSON: {e}")
-            print("Raw response:", response.text)
+        chart_output = json.loads(response.text)
+        return chart_output
 
     except Exception as e:
-        print(f"Error generating content: {e}")
+        st.error(f"Error generating content: {e}")
+        return None
+
+def main():
+    st.set_page_config(
+        page_title="AI Chart Generator",
+        page_icon="📊",
+        layout="wide"
+    )
+
+    st.title("📊 AI-Powered Chart Generator")
+    st.markdown("Upload your CSV files and chat with AI to generate insightful charts!")
+
+    # Initialize session state for chat history
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'csv_data' not in st.session_state:
+        st.session_state.csv_data = []
+
+    with st.sidebar:
+        st.header("📁 Upload CSV Files")
+        uploaded_files = st.file_uploader(
+            "",
+            accept_multiple_files=True,
+            type=['csv'],
+            help="Upload one or more CSV files to analyze"
+        )
+
+        if uploaded_files:
+            st.session_state.csv_data = get_uploaded_csv_data(uploaded_files)
+            st.success(f"✅ Loaded {len(st.session_state.csv_data)} CSV file(s)")
+
+            # Show file previews
+            with st.expander("📋 File Previews"):
+                for data in st.session_state.csv_data:
+                    st.write(f"**{data['filename']}**")
+                    # Show first few lines
+                    try:
+                        df = pd.read_csv(io.StringIO(data['content']))
+                        st.dataframe(df.head(3), use_container_width=True)
+                    except:
+                        st.text(data['content'][:200] + "..." if len(data['content']) > 200 else data['content'])
+                    st.divider()
+
+    # Main chat interface
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.header("💬 Chat Interface")
+
+        # Display chat history
+        chat_container = st.container()
+        with chat_container:
+            for i, chat in enumerate(st.session_state.chat_history):
+                # User message
+                with st.chat_message("user"):
+                    st.write(chat['user_message'])
+
+                # AI response
+                with st.chat_message("assistant"):
+                    st.write(chat['ai_response'])
+                    if chat.get('chart_fig'):
+                        st.pyplot(chat['chart_fig'], use_container_width=True)
+
+        # Chat input
+        user_input = st.chat_input("Ask me to create a chart from your data...")
+
+        if user_input and st.session_state.csv_data:
+            # Initialize Gemini
+            model = initialize_gemini()
+
+            if not model:
+                st.error("❌ Please provide a valid API key in the sidebar or set KEY in your .env file")
+                return
+
+            with st.spinner("🤖 AI is analyzing your data and generating chart..."):
+                # Generate chart based on user query
+                chart_output = generate_chart_from_query(model, st.session_state.csv_data, user_input)
+
+                if chart_output:
+                    ai_response = chart_output['response']
+
+                    # Create chart if requested
+                    chart_fig = None
+                    if chart_output['display_chart']:
+                        chart_fig = create_chart_from_ai_output(chart_output['chart'])
+
+                    # Add to chat history
+                    st.session_state.chat_history.append({
+                        'user_message': user_input,
+                        'ai_response': ai_response,
+                        'chart_fig': chart_fig,
+                        'work_shown': chart_output.get('work', ''),
+                        'timestamp': datetime.now()
+                    })
+
+                    # Refresh the page to show new chat
+                    st.rerun()
+
+        elif user_input and not st.session_state.csv_data:
+            st.warning("⚠️ Please upload CSV files first!")
 
 if __name__ == "__main__":
     main()
